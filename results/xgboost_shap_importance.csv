@@ -1,0 +1,22 @@
+feature,mean_abs_shap
+time vs mean,1.4860376
+ttme,0.9727057
+invt,0.20228836
+gc,0.19549282
+total time,0.12233484
+mode=car,0.116613574
+mode=train,0.09802693
+invc,0.091295056
+gc rel min,0.08114018
+hinc,0.05285564
+party adjusted cost,0.015370978
+time rel min,0.014725359
+gc vs mean,0.013588503
+is fastest,0.0
+is lowest gc,0.0
+psize,0.0
+cost per income,0.0
+mode=bus,0.0
+mode=air,0.0
+segment=0,0.0
+segment=1,0.0

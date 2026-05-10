@@ -1,0 +1,2 @@
+seed,train_individuals,test_individuals,train_rows,test_rows,positive_rate_train,positive_rate_test
+439,157,53,628,212,0.25,0.25
