@@ -18,8 +18,8 @@
 \title{Segmentation-Aware Machine Learning for Intercity Travel Mode Choice Prediction}
 
 \author{%
-  CS439 Spring 2026\\
-  Student\\
+  Utkarsh Dubey\\
+  Department of Computer Science\\
   \texttt{ud38@scarletmail.rutgers.edu}\\
 }
 
@@ -27,13 +27,13 @@
 \maketitle
 
 \begin{abstract}
-Reliable travel mode prediction helps transportation planners understand how travelers trade off cost, time, party size, and household income when choosing among air, train, bus, and car.  This project studies the Travel Mode Choice dataset, which contains 840 alternative-level observations from 210 intercity travelers, and frames prediction as a leakage-sensitive grouped choice problem: each traveler contributes four alternatives, exactly one of which is selected.  I propose a lightweight hybrid pipeline that first clusters travelers using K-Means on choice-set attributes and then adds the learned segment labels to supervised classifiers.  The pipeline includes strict group-level train/test separation, binary mapping, one-hot encoding, standardized numerical features, utility-inspired feature engineering, and multiple baselines.  On a held-out set of 53 unseen travelers, the best operational model, a segmentation-aware Random Forest, achieves 94.3\% top-1 choice-set accuracy and 96.2\% top-2 accuracy, substantially improving over logistic regression (69.8\% top-1) and rule-based baselines (26.4--32.1\% top-1).  XGBoost obtains the strongest row-level discrimination with ROC-AUC 0.985 and F1 0.925.  TreeSHAP analysis indicates that relative travel time, terminal waiting time, in-vehicle time, and generalized cost are the dominant predictors, aligning the learned models with transportation intuition.
+Reliable travel mode prediction helps transportation planners understand how travelers trade off cost, time, party size, and household income when choosing among air, train, bus, and car.  This project studies the Travel Mode Choice dataset, which contains 840 alternative-level observations from 210 intercity travelers, and frames prediction as a leakage-sensitive grouped choice problem: each traveler contributes four alternatives, exactly one of which is selected.  I propose a lightweight hybrid pipeline that first clusters travelers using K-Means on choice-set attributes and then adds the learned segment labels to supervised classifiers.  The pipeline includes strict group-level train/test separation, binary mapping, one-hot encoding, standardized numerical features, utility-inspired feature engineering, and multiple baselines.  On a held-out set of 53 unseen travelers, the best operational model, a segmentation-aware Random Forest, achieves 94.3\% top-1 choice-set accuracy and 96.2\% top-2 accuracy, substantially improving over logistic regression (69.8\% top-1) and rule-based baselines (26.4--32.1\% top-1).  A targeted ablation shows that the segment label mainly improves row-level calibration and F1 rather than changing the final top-1 ranking.  XGBoost obtains the strongest row-level discrimination with ROC-AUC 0.985 and F1 0.925.  TreeSHAP analysis indicates that relative travel time, terminal waiting time, in-vehicle time, and generalized cost are the dominant predictors, aligning the learned models with transportation intuition.
 \end{abstract}
 
 \paragraph{Code repository.} \url{https://github.com/utkarshdubey/cs439-mode-choice-final}.  The accompanying reproducibility package contains the full preprocessing, segmentation, model training, evaluation, and figure-generation pipeline.
 
 \section{Introduction}
-Mode choice modeling asks which transportation alternative a traveler will select from a feasible set.  Although classical transportation planning often relies on discrete-choice models, modern data science workflows can complement these models by learning nonlinear interactions, producing operational predictions, and exposing feature-level explanations.  In this project, the application is intercity travel between Australian cities, where each traveler chooses one of four modes: air, train, bus, or car.  The practical objective is not only to estimate whether a single row is chosen, but also to rank the four alternatives for each unseen traveler and select the most likely mode.
+Mode choice modeling asks which transportation alternative a traveler will select from a feasible set.  Although classical transportation planning often relies on discrete-choice models, modern data science workflows can complement these models by learning nonlinear interactions, producing operational predictions, and exposing feature-level explanations.  In this project, the application is intercity travel between Australian cities, where each traveler chooses one of four modes: air, train, bus, or car.  A practical stakeholder is a transit agency or policy analyst deciding whether service hours, fare incentives, or terminal improvements are likely to shift travelers away from private car or air travel.  The practical objective is therefore not only to estimate whether a single row is chosen, but also to rank the four alternatives for each unseen traveler and select the most likely mode.
 
 The problem is deceptively easy to evaluate incorrectly.  The dataset is stored in long format, so each traveler appears in four rows.  A standard random row split would place some alternatives from the same traveler in training and others in testing, leaking traveler-specific income, party size, and choice-set structure into evaluation.  Therefore, this project treats the traveler as the atomic unit for splitting, clustering, cross-validation, and final testing.
 
@@ -50,11 +50,15 @@ The main research question is: \emph{Can traveler segmentation and utility-inspi
 \subsection{Dataset and problem formulation}
 The dataset is loaded from \texttt{statsmodels.datasets.modechoice}, whose documentation describes it as a 1987 intercity mode-choice sample with 210 travelers and four alternatives per traveler \citep{statsmodels_modechoice}.  The raw fields are traveler ID, mode ID, binary choice label, terminal waiting time (\texttt{ttme}), in-vehicle cost (\texttt{invc}), in-vehicle time (\texttt{invt}), generalized cost (\texttt{gc}), household income (\texttt{hinc}), and party size (\texttt{psize}).  I map mode IDs to \{air, train, bus, car\} and cast the target \texttt{choice} into a binary variable $y_{ij}\in\{0,1\}$ for traveler $i$ and mode $j$.
 
-The row-level model estimates $\hat{p}_{ij}=P(y_{ij}=1\mid x_{ij})$.  For operational choice prediction, probabilities are converted into a traveler-level decision by selecting
+The supervised model is an independent binary ranker rather than a fully normalized conditional-logit model.  For each traveler-mode row, it learns a score $s_{ij}=f_\theta(x_{ij}, z_i)$ from alternative features $x_{ij}$ and optional segment label $z_i$, then maps the score to a choice probability,
+\begin{equation}
+\hat{p}_{ij}=P(y_{ij}=1\mid x_{ij},z_i)=\sigma(s_{ij})=\frac{1}{1+\exp(-s_{ij})}.
+\end{equation}
+For operational choice prediction, these row-level probabilities are converted into a traveler-level decision by selecting
 \begin{equation}
 \hat{j}_i = \arg\max_{j\in\{\text{air, train, bus, car}\}} \hat{p}_{ij}.
 \end{equation}
-The primary metric is top-1 choice-set accuracy, $\frac{1}{N}\sum_i \mathbb{1}[\hat{j}_i=j_i]$, because a transportation planner ultimately needs the chosen mode within each traveler choice set.  I also report top-2 accuracy, row-level F1, ROC-AUC, PR-AUC, and log loss.
+This differs from a true conditional logit, which would normalize $\exp(V_{ij})$ across all four alternatives within a traveler; I return to this modeling limitation in Section~\ref{sec:discussion}.  The primary metric is top-1 choice-set accuracy, $\frac{1}{N}\sum_i \mathbb{1}[\hat{j}_i=j_i]$, because a transportation planner ultimately needs the chosen mode within each traveler choice set.  I also report top-2 accuracy, row-level F1, ROC-AUC, PR-AUC, and log loss.
 
 \subsection{Preprocessing and leakage prevention}
 The preprocessing pipeline is deliberately conservative.  I first verify that the dataset has no missing values, no duplicate rows, exactly four alternatives per traveler, and exactly one chosen alternative per traveler.  The final split uses \texttt{GroupShuffleSplit} with traveler ID as the group, producing 157 training travelers (628 rows) and 53 held-out test travelers (212 rows).  Cross-validation uses five-fold \texttt{GroupKFold}, again grouped by traveler ID.
@@ -65,7 +69,7 @@ Feature transformations are fit only on training data inside scikit-learn pipeli
 To add interpretable cohort information, I build a traveler-level matrix using income, party size, and summary statistics for each traveler's four alternatives.  For each of \texttt{gc}, \texttt{ttme}, \texttt{invc}, \texttt{invt}, and total time, the matrix includes minimum, mean, maximum, range, and mode-specific values.  K-Means is fit on training travelers only, and held-out travelers are assigned to the nearest training-fitted centroid.  I test $k\in\{2,3,4,5,6\}$ and select $k=2$ because it yields the highest silhouette score and lowest Davies-Bouldin score in the training data.  The two segments correspond to longer, higher generalized-cost choice sets versus shorter, lower-cost choice sets.
 
 \subsection{Supervised models and baselines}
-The supervised baselines include logistic regression with raw features, logistic regression with engineered features, and logistic regression with engineered features plus segment labels.  The tree-based models are Random Forest, Extra Trees, and XGBoost.  Class weights or positive-class scaling are used because each four-row choice set has one positive and three negative rows.  Hyperparameters are kept intentionally small and stable to avoid overfitting the 210-traveler sample: Random Forest and Extra Trees use 300 trees, maximum depth 5, and minimum leaf size 3; XGBoost uses 100 trees of depth 2 with learning rate 0.08.  Three non-learning baselines are also included: always choose the training-popular mode, choose the alternative with lowest generalized cost, and choose the fastest total-time alternative.
+The supervised baselines include logistic regression with raw features, logistic regression with engineered features, and logistic regression with engineered features plus segment labels.  The tree-based models are Random Forest, Extra Trees, and XGBoost.  I include a Random Forest without segment labels as a targeted ablation so that the effect of segmentation can be isolated from the effect of engineered features.  Class weights are used for logistic regression and bagged trees, while XGBoost uses positive-class scaling, because each four-row choice set has one positive and three negative rows; resampling methods such as SMOTE are avoided because synthetic rows could break the within-traveler choice-set structure.  Hyperparameters are kept intentionally small and stable to avoid overfitting the 210-traveler sample: Random Forest and Extra Trees use 300 trees, maximum depth 5, and minimum leaf size 3; XGBoost uses 100 trees of depth 2 with learning rate 0.08.  Three non-learning baselines are also included: always choose the training-popular mode, choose the alternative with lowest generalized cost, and choose the fastest total-time alternative.
 
 \section{Experiments \& Results}
 \subsection{Segmentation diagnostics}
@@ -88,13 +92,13 @@ Segment & Travelers & Mean income & Mean party size & Mean generalized cost & Me
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.62\linewidth]{./pca_segments.pdf}
+\includegraphics[width=0.62\linewidth]{../figures/pca_segments.pdf}
 \caption{PCA projection of traveler-level K-Means segments.  Segment 0 represents longer and more expensive choice sets, while Segment 1 represents shorter and lower-cost choice sets.}
 \label{fig:segments}
 \end{figure}
 
 \subsection{Predictive performance}
-Table~\ref{tab:results} reports the main supervised results on the held-out travelers.  The rule-based baselines are weak: lowest generalized cost obtains 32.1\% top-1 choice-set accuracy, and fastest total time obtains 26.4\%.  Logistic regression with raw features reaches 58.5\% top-1 accuracy.  Adding utility-inspired engineered features raises logistic top-1 accuracy to 69.8\%, showing that the feature design contributes more than the model family alone.  The best operational model is Random Forest with segment labels, which reaches \textbf{94.3\%} top-1 accuracy and 96.2\% top-2 accuracy.  XGBoost is the strongest row-level ranker, with \textbf{0.985 ROC-AUC}, \textbf{0.966 PR-AUC}, and \textbf{0.925 F1}, but its top-1 choice-set accuracy is slightly below Random Forest.
+Table~\ref{tab:results} reports the main supervised results on the held-out travelers.  The rule-based baselines are weak: lowest generalized cost obtains 32.1\% top-1 choice-set accuracy, and fastest total time obtains 26.4\%.  Logistic regression with raw features reaches 58.5\% top-1 accuracy.  Adding utility-inspired engineered features raises logistic top-1 accuracy to 69.8\%, showing that the feature design contributes more than the model family alone.  The Random Forest ablation shows that segment labels do not change top-1 choice accuracy in this split, but they improve row-level F1 from 0.891 to 0.923 and PR-AUC from 0.948 to 0.952.  I therefore treat RandomForest+segments as the best operational model because it ties the no-segment forest on top-1 accuracy while giving stronger row-level classification.  XGBoost is the strongest row-level ranker, with \textbf{0.985 ROC-AUC}, \textbf{0.966 PR-AUC}, and \textbf{0.925 F1}, but its top-1 choice-set accuracy is slightly below Random Forest.
 
 \begin{table}[H]
 \centering
@@ -109,6 +113,7 @@ Model & CV ROC-AUC & F1 & ROC-AUC & PR-AUC & Top-1 choice acc. & Top-2 acc. \\
 Logit-basic & 0.797 $\pm$ 0.049 & 0.500 & 0.707 & 0.641 & 0.585 & 0.736 \\
 Logit-engineered & 0.885 $\pm$ 0.034 & 0.644 & 0.838 & 0.762 & 0.698 & 0.849 \\
 Logit+segments & 0.886 $\pm$ 0.036 & 0.639 & 0.835 & 0.762 & 0.698 & 0.849 \\
+RandomForest-engineered & 0.966 $\pm$ 0.022 & 0.891 & 0.971 & 0.948 & \textbf{0.943} & \textbf{0.962} \\
 RandomForest+segments & 0.966 $\pm$ 0.020 & 0.923 & 0.972 & 0.952 & \textbf{0.943} & \textbf{0.962} \\
 ExtraTrees+segments & 0.926 $\pm$ 0.020 & 0.723 & 0.911 & 0.858 & 0.755 & \textbf{0.962} \\
 XGBoost+segments & \textbf{0.972 $\pm$ 0.023} & \textbf{0.925} & \textbf{0.985} & \textbf{0.966} & 0.925 & \textbf{0.962} \\
@@ -118,24 +123,24 @@ XGBoost+segments & \textbf{0.972 $\pm$ 0.023} & \textbf{0.925} & \textbf{0.985} 
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.94\linewidth]{./choice_set_accuracy.pdf}
+\includegraphics[width=0.94\linewidth]{../figures/choice_set_accuracy.pdf}
 \caption{Top-1 choice-set accuracy for rules and supervised models.  The ensemble models substantially outperform utility-only rules and logistic regression.}
 \label{fig:accuracy}
 \end{figure}
 
 \subsection{Error analysis and interpretation}
-The Random Forest confusion matrix in Figure~\ref{fig:cm} shows that the best operational model correctly predicts most modes and makes only three traveler-level mistakes on the 53-person test set.  The remaining errors are plausible confusions between alternatives with similar time-cost profiles.  ROC curves in Figure~\ref{fig:roc} confirm that the tree ensembles dominate logistic regression as row-level rankers, while XGBoost has the best discrimination across thresholds.
+The Random Forest confusion matrix in Figure~\ref{fig:cm} shows that the best operational model correctly predicts most modes and makes only three traveler-level mistakes on the 53-person test set.  Because each traveler corresponds to about 1.9 percentage points of top-1 accuracy, I interpret small gaps between high-performing ensembles cautiously rather than treating one-person differences as statistically decisive.  The remaining errors are plausible confusions between alternatives with similar time-cost profiles.  ROC curves in Figure~\ref{fig:roc} confirm that the tree ensembles dominate logistic regression as row-level rankers, while XGBoost has the best discrimination across thresholds.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.48\linewidth]{./rf_confusion_matrix.pdf}
+\includegraphics[width=0.48\linewidth]{../figures/rf_confusion_matrix.pdf}
 \caption{Choice-set confusion matrix for RandomForest+segments. Rows are true chosen modes and columns are predicted modes.}
 \label{fig:cm}
 \end{figure}
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.68\linewidth]{./roc_curves.pdf}
+\includegraphics[width=0.68\linewidth]{../figures/roc_curves.pdf}
 \caption{ROC curves on held-out travelers.  XGBoost gives the highest row-level ROC-AUC, while Random Forest gives the best top-1 choice-set accuracy.}
 \label{fig:roc}
 \end{figure}
@@ -144,18 +149,19 @@ TreeSHAP results in Figure~\ref{fig:shap} provide a sanity check on model behavi
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.62\linewidth]{./shap_top_features.pdf}
+\includegraphics[width=0.62\linewidth]{../figures/shap_top_features.pdf}
 \caption{Top TreeSHAP features for XGBoost.  Relative time and cost variables dominate, which is behaviorally plausible for intercity mode choice.}
 \label{fig:shap}
 \end{figure}
 
 \section{Discussion and Limitations}
-The results show that careful evaluation design matters as much as model choice.  If alternatives from the same traveler were randomly split across train and test sets, evaluation would be inflated by leakage.  Grouped splitting gives a harder and more realistic test: the model must generalize to entirely unseen travelers.  Under that protocol, feature engineering produces a clear improvement over raw-feature logistic regression, and tree ensembles capture interactions that logistic regression misses.  The segmentation step is most useful for interpretation and cohort auditing; it does not dramatically change logistic regression accuracy, but it gives a concise way to distinguish long/high-cost and short/low-cost traveler contexts.
+\label{sec:discussion}
+The results show that careful evaluation design matters as much as model choice.  If alternatives from the same traveler were randomly split across train and test sets, evaluation would be inflated by leakage.  Grouped splitting gives a harder and more realistic test: the model must generalize to entirely unseen travelers.  Under that protocol, feature engineering produces a clear improvement over raw-feature logistic regression, and tree ensembles capture interactions that logistic regression misses.  The segmentation ablation gives a nuanced result: segment labels do not materially change the final top-1 choice ranking for logistic regression or Random Forest, but they improve Random Forest row-level F1 and provide a concise way to audit long/high-cost versus short/low-cost traveler contexts.
 
 The main limitation is dataset size.  The sample contains only 210 travelers and is choice-based, with oversampling of less popular modes, so the model should not be interpreted as estimating real population mode shares without additional weighting or external validation.  The dataset also lacks variables that are important in modern travel behavior, such as departure time, service reliability, comfort, vehicle ownership, emissions preferences, and geographic context.  Finally, the independent binary formulation ranks alternatives well, but a true conditional logit or neural choice model could explicitly normalize probabilities within each choice set.
 
 \section{Conclusion}
-This project developed a reproducible, leakage-safe data science pipeline for intercity travel mode choice prediction.  The strongest operational model, a segmentation-aware Random Forest, achieved 94.3\% top-1 choice-set accuracy on unseen travelers, while XGBoost achieved the best row-level ROC-AUC of 0.985.  The analysis demonstrates that a low-effort but rigorous hybrid pipeline--grouped splitting, utility-inspired features, K-Means traveler segmentation, tree ensembles, and SHAP interpretation--can satisfy both predictive and interpretability goals.  Future work should validate the pipeline on larger, more recent travel surveys, incorporate sample weights for population inference, and compare the binary ranking setup with dedicated multinomial and conditional logit architectures.
+This project developed a reproducible, leakage-safe data science pipeline for intercity travel mode choice prediction.  The strongest operational model, a segmentation-aware Random Forest, achieved 94.3\% top-1 choice-set accuracy on unseen travelers, while XGBoost achieved the best row-level ROC-AUC of 0.985.  The analysis demonstrates that a low-effort but rigorous hybrid pipeline--grouped splitting, utility-inspired features, K-Means traveler segmentation, tree ensembles, targeted ablation, and SHAP interpretation--can satisfy both predictive and interpretability goals.  Future work should validate the pipeline on larger, more recent travel surveys, incorporate sample weights for population inference, and compare the binary ranking setup with dedicated multinomial and conditional logit architectures.
 
 \begin{thebibliography}{10}
 

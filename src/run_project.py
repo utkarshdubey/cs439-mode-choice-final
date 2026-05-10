@@ -1,11 +1,13 @@
 """
-This script loads the Statsmodels Travel Mode Choice dataset, performs leakage safe
+This harness loads the Statsmodels Travel Mode Choice dataset, performs leakage safe
 preprocessing, fits unsupervised traveler segments on the training set only, trains
 several supervised models, evaluates row-level and choice-set metrics, and writes
 all figures/tables used in the final report.
 
 Run from the repository root with:
     python src/run_project.py
+
+Author: ud38
 """
 from __future__ import annotations
 
@@ -63,7 +65,7 @@ def load_data() -> pd.DataFrame:
     df["choice"] = df["choice"].astype(int)
     df["mode_name"] = df["mode"].map(MODE_MAP)
 
-    # Basic reproducibility/sanity checks that catch data leakage and corruption.
+    # Sanity checks
     assert df.isna().sum().sum() == 0, "Unexpected missing values."
     assert df.duplicated().sum() == 0, "Unexpected duplicate rows."
     assert (df.groupby("individual")["choice"].sum() == 1).all(), (
@@ -231,7 +233,7 @@ def save_figures(
 ):
     FIG_DIR.mkdir(exist_ok=True)
 
-    # K selection: silhouette.
+    # K selection (silhouette)
     plt.figure(figsize=(5.5, 3.6))
     plt.plot(k_stats["k"], k_stats["silhouette"], marker="o")
     plt.xlabel("Number of clusters (k)")
@@ -243,7 +245,7 @@ def save_figures(
     plt.savefig(FIG_DIR / "kmeans_silhouette.png", dpi=200)
     plt.close()
 
-    # PCA visualization.
+    # PCA visualization
     plt.figure(figsize=(5.4, 4.2))
     for seg, sub in pca_df.groupby("segment"):
         plt.scatter(sub["pc1"], sub["pc2"], s=28, alpha=0.8, label=f"Segment {seg}")
@@ -257,7 +259,7 @@ def save_figures(
     plt.savefig(FIG_DIR / "pca_segments.png", dpi=200)
     plt.close()
 
-    # Choice-set accuracy including rules.
+    # Choice-set accuracy
     plot_df = pd.concat(
         [
             baseline_df[["model", "choice_set_accuracy"]],
@@ -278,7 +280,7 @@ def save_figures(
     plt.savefig(FIG_DIR / "choice_set_accuracy.png", dpi=200)
     plt.close()
 
-    # ROC curves.
+    # ROC curves
     y_test = test_df["choice"].to_numpy()
     plt.figure(figsize=(5.5, 4.2))
     for name, prob in probas.items():
@@ -296,7 +298,7 @@ def save_figures(
     plt.savefig(FIG_DIR / "roc_curves.png", dpi=200)
     plt.close()
 
-    # Confusion matrix for the best operational model.
+    # Confusion matrix
     plt.figure(figsize=(4.5, 4.0))
     plt.imshow(rf_cm)
     plt.xticks(np.arange(len(MODE_ORDER)), MODE_ORDER)
@@ -312,7 +314,7 @@ def save_figures(
     plt.savefig(FIG_DIR / "rf_confusion_matrix.png", dpi=200)
     plt.close()
 
-    # SHAP/TreeSHAP top features from XGBoost.
+    # Top features (SHAP)
     top = shap_importance.sort_values("mean_abs_shap", ascending=True).tail(10)
     plt.figure(figsize=(5.5, 4.0))
     plt.barh(top["feature"], top["mean_abs_shap"])
@@ -394,6 +396,21 @@ def main() -> None:
             ),
         ),
         (
+            "RandomForest-engineered",
+            build_pipeline(
+                RandomForestClassifier(
+                    n_estimators=300,
+                    max_depth=5,
+                    min_samples_leaf=3,
+                    class_weight="balanced",
+                    random_state=SEED,
+                    n_jobs=1,
+                ),
+                numeric_engineered,
+                ["mode_name"],
+            ),
+        ),
+        (
             "RandomForest+segments",
             build_pipeline(
                 RandomForestClassifier(
@@ -472,7 +489,7 @@ def main() -> None:
     metrics_df = pd.DataFrame(metric_rows)
     metrics_df.to_csv(RES_DIR / "model_metrics.csv", index=False)
 
-    # Baselines that choose a single mode within each traveler choice set.
+    # Rule-based baselines
     baseline_rows = []
     for label, scores in [
         ("Rule: lowest GC", -test_df["gc"].to_numpy()),
@@ -487,7 +504,7 @@ def main() -> None:
     baseline_df = pd.DataFrame(baseline_rows)
     baseline_df.to_csv(RES_DIR / "baseline_metrics.csv", index=False)
 
-    # Segment summary for interpretation.
+    # Segment stats
     segment_summary = (
         df.groupby("segment")
         .agg(
@@ -504,7 +521,7 @@ def main() -> None:
     segment_summary.to_csv(RES_DIR / "segment_summary.csv", index=False)
     k_stats.to_csv(RES_DIR / "kmeans_selection.csv", index=False)
 
-    # TreeSHAP for XGBoost interpretability.
+    # Feature importance (SHAP)
     xgb_pipe = fitted["XGBoost+segments"]
     transformed = xgb_pipe.named_steps["preprocess"].transform(x_test)
     names = [clean_feature_name(n) for n in xgb_pipe.named_steps["preprocess"].get_feature_names_out()]
@@ -515,7 +532,7 @@ def main() -> None:
     ).sort_values("mean_abs_shap", ascending=False)
     shap_importance.to_csv(RES_DIR / "xgboost_shap_importance.csv", index=False)
 
-    # Summary metadata.
+    # Run summary
     summary = pd.DataFrame(
         [
             {
